@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f4f2e9">
+  <meta name="description" content="Спокойная головоломка: поворачивайте провода и возвращайте свет в маленький вечерний квартал.">
+  <title>Зажги квартал — маленькая добрая головоломка</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 48 48'%3E%3Crect width='48' height='48' rx='14' fill='%23cf754e'/%3E%3Cpath d='m27 7-15 21h11l-3 13 16-23H25z' fill='%23fff0cf'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="style.css">
+  <script src="engine.js" defer></script>
+  <script src="levels.js" defer></script>
+  <script src="art.js" defer></script>
+  <script src="game.js" defer></script>
+</head>
+<body>
+  <div class="shell">
+    <header class="site-header">
+      <a class="brand" href="./index.html" aria-label="Зажги квартал, главная"><span class="brand-mark" data-icon="bolt"></span><span>Зажги квартал<span class="brand-caption">МАЛЕНЬКИЕ ЗАДАЧИ. ТЁПЛЫЕ ВЕЧЕРА.</span></span></a>
+      <div class="header-actions"><button id="sound" class="icon-button" aria-label="Включить звук" title="Включить звук" data-icon="mute"></button><button id="help" class="icon-button" aria-label="Как играть" title="Как играть" data-icon="help"></button></div>
+    </header>
+    <main>
+      <div class="intro"><div><p class="eyebrow"><span class="tiny-sun"></span> УЛИЦА ТЁПЛЫХ ОКОН</p><h1>Вечер начинается со света.</h1></div><p class="intro-note">Никуда не спешите.<br>Здесь всё решается одним поворотом.</p></div>
+      <div class="game-layout">
+        <section class="puzzle-panel" aria-label="Головоломка">
+          <div class="level-heading"><div><p class="eyebrow" id="level-number"></p><h2 id="level-title"></h2></div><span class="house-counter" id="house-counter" aria-live="polite"></span></div>
+          <p class="level-caption" id="level-caption"></p>
+          <div class="board-wrap"><div id="board" class="board" aria-label="Игровое поле"></div><div id="victory" class="victory" hidden aria-live="polite"></div></div>
+          <div class="lesson" id="lesson" aria-live="polite"></div>
+          <div class="puzzle-actions"><button id="undo" class="tool-button"><span data-icon="undo"></span>Отменить</button><button id="restart" class="tool-button"><span data-icon="reset"></span>Заново</button><button id="hint" class="tool-button hint-button"><span data-icon="bolt"></span>Подсказка</button></div>
+          <p id="hint-text" class="hint-text" hidden></p>
+          <div class="puzzle-meta"><span id="moves">0 поворотов</span><span id="save-status">Прогресс сохраняется на этом устройстве</span></div>
+        </section>
+        <aside class="neighborhood" aria-label="Ваш квартал">
+          <div class="town-card"><div class="town-top"><span class="eyebrow">ВАШ КВАРТАЛ</span><span class="chapter-tag">01</span></div><div id="town" class="town-art"></div><div class="town-copy"><h2 id="town-title">Пока город дремлет</h2><p id="town-caption">За каждым тёмным окном кто-то ждёт немного света.</p><div class="progress-label"><span>Тёплые огоньки</span><strong id="progress-label">0 / 12</strong></div><div class="progress-track"><span id="progress-fill"></span></div><div id="milestones" class="milestones"></div><div id="decor" class="decor" hidden><p>Добавим последний штрих?</p><button data-decor="garland">Гирлянда</button><button data-decor="flowers">Цветы</button></div></div></div>
+          <div class="level-selector"><div class="selector-heading"><h3>Прогулка по улице</h3><span>12 историй</span></div><div id="level-list" class="level-list"></div><div id="bonus-section" hidden><p class="bonus-label">ЕЩЁ НЕМНОГО СВЕТА</p><div id="bonus-list" class="level-list bonus-list"></div></div></div>
+          <p class="quiet-note"><span data-icon="leaf"></span>Без таймера. Без суеты. В вашем темпе.</p>
+        </aside>
+      </div>
+    </main>
+    <footer><span>Сделайте ещё один вечер чуть светлее.</span><button id="test-tools" class="text-button">Дневник теста</button></footer>
+  </div>
+  <dialog id="modal"><button class="modal-close icon-button" id="modal-close" aria-label="Закрыть" data-icon="close"></button><div id="modal-content"></div></dialog>
+  <noscript>Для игры нужен включённый JavaScript.</noscript>
+</body>
+</html>
