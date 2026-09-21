@@ -1,403 +1,110 @@
-(function () {
+/* Campaign UI. Pure rules, content, saves and platform services are separate modules. */
+(async function () {
   'use strict';
-  const E = BlockEngine, A = BlockArt, levels = BlockLevels;
-  const BUILD = '0.2.0', MAIN_KEY = 'light-block:progress:v1', STUDY_KEY = 'light-block:study-progress:v1', LOG_KEY = 'light-block:study-log:v1';
-  const $ = id => document.getElementById(id);
-  let storageOK = true, logOK = true, audioContext, lastClock = performance.now(), checkpointActive = false;
-  let returnNormalOnClose = false, waveTimer = 0, townTimer = 0;
-  const motionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
-  const lessMotion = () => state.reducedMotion || motionQuery.matches;
-  const rotationsInFlight = new Map();
-  const freshState = () => ({ version:1,current:1,completed:[],attempts:{},sound:false,decor:'garland',reducedMotion:false });
-  function read(key) {
-    try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : null; }
-    catch (_) { storageOK = false; return null; }
+  const E=BlockEngine,A=BlockArt,S=BlockStore,P=BlockPlatform,I=BlockI18n;
+  const BUILD='1.0.0', $=id=>document.getElementById(id);
+  const t=(key,data)=>I.t(key,data), esc=v=>String(v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  let state,level,attempt,network,mode='campaign',storageOK=true,audio,modalKind='',busy=false;
+  let lastClock=performance.now(),activeMs=0,lastAdMs=0,winsSinceAd=0,waveTimer,toastTimer,cloudWaiting,loadedSaveKey,cloudSelection=false;
+  const spins=new Map(),motion=matchMedia('(prefers-reduced-motion: reduce)');
+  const reduced=()=>state?.reducedMotion||motion.matches;
+  const stamp=()=>{attempt=S.stampAttempt(attempt,Date.now());(mode==='daily'?state.daily.attempts:state.attempts)[level.id]=attempt;};
+  const district=()=>mode==='campaign'?Math.floor((level.id-1)/20):Math.floor((state.current-1)/20);
+  const count=d=>state.completed.filter(id=>Math.floor((id-1)/20)===d).length;
+  const interactive=()=>!!network&&!network.solved&&!document.hidden&&!$('modal').open&&!P.paused&&!busy;
+  function tick(){const now=performance.now(),delta=Math.max(0,Math.min(1000,now-lastClock));lastClock=now;if(interactive()){activeMs+=delta;attempt.foregroundMs=(attempt.foregroundMs||0)+delta;}}
+  function syncPlay(){tick();P.gameplay(interactive());if((document.hidden||P.paused||busy||$('modal').open)&&audio)audio.suspend().catch(()=>{});$('pause-cover').hidden=!P.paused;$('pause-cover').textContent=t('paused');}
+  function status(){const key=!storageOK?'saveError':P.cloudStatus==='synced'?'cloudSaved':P.cloudStatus==='pending'?'cloudPending':P.cloudStatus==='error'?'cloudError':'saved';$('save-status').textContent=t(key);$('save-status').classList.toggle('save-warning',!storageOK);}
+  function save(){state.updatedAt=Math.max(Date.now(),state.updatedAt+1);try{P.storage.setItem(loadedSaveKey,JSON.stringify(state));storageOK=true;}catch{storageOK=false;}P.save(state);status();}
+  function read(key){try{const value=P.storage.getItem(key);return value?JSON.parse(value):null;}catch{storageOK=false;return null;}}
+  function event(name,data={}){const counter=globalThis.BlockRelease?.metricaCounter;if(counter&&typeof globalThis.ym==='function'){try{globalThis.ym(counter,'reachGoal',name,{build:BUILD,language:I.language,...data});}catch{}}}
+  function resize(){const area=document.querySelector('.board-area');if(!area)return;const edge=Math.floor(Math.max(100,Math.min(area.clientWidth-14,area.clientHeight-14,490)));document.querySelector('.board-frame').style.setProperty('--edge',edge+'px');}
+  function settingsText(){
+    I.set(state.language==='auto'?P.language:state.language);document.documentElement.lang=I.language;document.title=t('brand');
+    document.querySelectorAll('[data-t]').forEach(el=>el.textContent=t(el.dataset.t));
+    document.querySelectorAll('[data-icon]').forEach(el=>el.innerHTML=A.icon(el.dataset.icon));
+    $('sound').innerHTML=A.icon(state.sound?'sound':'mute');$('sound').setAttribute('aria-label',t(state.sound?'soundOn':'soundOff'));
+    $('settings').setAttribute('aria-label',t('settings'));$('modal-close').setAttribute('aria-label',t('close'));
+    $('undo').innerHTML=A.icon('undo')+esc(t('undo'));$('restart').innerHTML=A.icon('reset')+esc(t('restart'));$('hint').innerHTML=A.icon('bolt')+esc(t('hint'));
+    document.documentElement.classList.toggle('reduced-motion',!!reduced());$('board').setAttribute('aria-label',t('board'));
+    if(reduced()){spins.clear();$('board').getAnimations({subtree:true}).forEach(a=>a.cancel());$('board').classList.remove('power-wave');clearTimeout(waveTimer);$('victory').style.setProperty('--win-delay','0ms');}
+    status();
   }
-  function cleanState(raw) {
-    const result = freshState();
-    if (!raw || raw.version !== 1) return result;
-    result.completed = [...new Set((Array.isArray(raw.completed) ? raw.completed : []).filter(n => Number.isInteger(n) && n >= 1 && n <= levels.length))].sort((a,b)=>a-b);
-    const unlocked = Math.min(levels.length, result.completed.reduce((n, id) => id === n ? n + 1 : n, 1));
-    result.current = Number.isInteger(raw.current) && raw.current >= 1 && raw.current <= unlocked ? raw.current : unlocked;
-    result.sound = raw.sound === true;
-    result.reducedMotion = raw.reducedMotion === true;
-    result.decor = raw.decor === 'flowers' ? 'flowers' : 'garland';
-    for (const level of levels) {
-      const valid = E.validateAttempt(level, raw.attempts && raw.attempts[level.id]);
-      if (valid) {
-        const previous = raw.attempts[level.id];
-        valid.foregroundMs = Number.isFinite(previous.foregroundMs) && previous.foregroundMs >= 0 ? previous.foregroundMs : 0;
-        valid.turns = Number.isSafeInteger(previous.turns) && previous.turns >= 0 ? previous.turns : valid.moves;
-        valid.undos = Number.isSafeInteger(previous.undos) && previous.undos >= 0 ? previous.undos : 0;
-        valid.number = Number.isSafeInteger(previous.number) && previous.number > 0 ? previous.number : 1;
-        valid.reported = previous.reported === true;
-        result.attempts[level.id] = valid;
-      }
-    }
-    return result;
-  }
-  const normalState = cleanState(read(MAIN_KEY));
-  let journal = read(LOG_KEY);
-  if (!journal || journal.schemaVersion !== 1 || !Array.isArray(journal.events) || typeof journal.testRunId !== 'string') journal = null;
-  if(journal){
-    journal.foregroundMs=Number.isFinite(journal.foregroundMs)&&journal.foregroundMs>=0?journal.foregroundMs:0;
-    journal.seq=Number.isSafeInteger(journal.seq)&&journal.seq>=0?journal.seq:journal.events.length;
-    journal.dropped=Number.isSafeInteger(journal.dropped)&&journal.dropped>=0?journal.dropped:0;
-    if(journal.events.length>2000){journal.dropped+=journal.events.length-2000;journal.events=journal.events.slice(-2000);}
-    journal.checkpointChoice=['stop','continue'].includes(journal.checkpointChoice)?journal.checkpointChoice:null;
-    journal.nextLevel=Number.isInteger(journal.nextLevel)&&journal.nextLevel>=1&&journal.nextLevel<=levels.length?journal.nextLevel:null;
-  }
-  let testing = !!journal && journal.running === true;
-  let stateKey = testing ? STUDY_KEY : MAIN_KEY;
-  let state = testing ? cleanState(read(STUDY_KEY)) : normalState;
-  let level, attempt, network, viewingSolved = false;
-  const sessionId = Math.random().toString(36).slice(2,10);
-  function saveLog() {
-    if (!journal) return;
-    try { localStorage.setItem(LOG_KEY, JSON.stringify(journal)); logOK = true; }
-    catch (_) { logOK = false; }
-    if (!logOK && testing) {
-      $('save-status').textContent='Дневник не сохраняется — скачайте его перед закрытием';
-      $('save-status').classList.add('save-warning');
-    }
-  }
-  function log(event, payload = {}) {
-    if (!testing || !journal) return;
-    const seq = ++journal.seq;
-    journal.events.push({seq,sessionId,foregroundMs:Math.round(journal.foregroundMs),event,payload});
-    if (journal.events.length > 2000) {
-      journal.events.shift(); journal.dropped = (journal.dropped || 0) + 1;
-    }
-    saveLog();
-  }
-  function save() {
-    try {
-      localStorage.setItem(stateKey, JSON.stringify(state));
-      storageOK = true;
-    } catch (_) { storageOK = false; log('save_error', {reason:'storage_unavailable'}); }
-    $('save-status').textContent = !storageOK ? 'Сохранение недоступно — не закрывайте вкладку' : testing && !logOK ? 'Дневник не сохраняется — скачайте его перед закрытием' : testing ? 'Тест: записи остаются на этом устройстве' : 'Прогресс сохраняется на этом устройстве';
-    $('save-status').classList.toggle('save-warning', !storageOK || (testing && !logOK));
-  }
-  function newAttempt(lvl, number = 1) {
-    return {...E.fresh(lvl),foregroundMs:0,turns:0,undos:0,number,reported:false};
-  }
-  function countMain() { return state.completed.filter(id => id <= 12).length; }
-  function maxUnlocked() {
-    let id = 1;
-    while (state.completed.includes(id) && id < levels.length) id++;
-    return id;
-  }
-  function tick() {
-    const now = performance.now(), elapsed = now - lastClock;
-    lastClock = now;
-    if (document.hidden || $('modal').open || checkpointActive || !attempt || network.solved) return;
-    attempt.foregroundMs += elapsed;
-    if (testing) {
-      journal.foregroundMs += elapsed;
-    }
-  }
-  function beforeAction() {
-    tick();
-    if(checkpointActive)return false;
-    if(testing && !journal.checkpointOffered && journal.foregroundMs >= 300000){checkpoint('five_minutes');return false;}
-    return true;
-  }
-  function setLevel(id, reason = 'select') {
-    if(!['load','test_start','return_normal'].includes(reason) && !beforeAction())return;
-    if(reason!=='load' && testing && id>3 && !journal.checkpointChoice && [1,2,3].every(n=>state.completed.includes(n))){journal.nextLevel=id;checkpoint('three_levels');return;}
-    if (!Number.isInteger(id) || id < 1 || id > maxUnlocked()) return;
-    clearTimeout(waveTimer); clearTimeout(townTimer);
-    rotationsInFlight.clear();
-    $('board').classList.remove('power-wave');
-    $('victory').style.setProperty('--win-delay','0ms');
-    state.current = id;
-    level = levels[id - 1];
-    const existed = !!state.attempts[id];
-    attempt = state.attempts[id] || (state.attempts[id] = newAttempt(level));
-    network = E.inspect(level, attempt.rotations);
-    viewingSolved = false;
-    $('hint-text').hidden = true;
-    $('level-number').textContent = id <= 12 ? `ИСТОРИЯ ${String(id).padStart(2,'0')} ИЗ 12` : `БОНУСНАЯ ИСТОРИЯ ${id - 12} ИЗ 3`;
-    $('level-title').textContent = level.title;
-    $('level-caption').textContent = level.caption;
-    log(existed ? 'level_resume' : 'level_start', {level:id,attempt:attempt.number,reason});
-    render(); save();
-    maybeCheckpoint();
-    if(reason!=='load'){
-      const bounds=$('board').getBoundingClientRect();
-      if(bounds.top<0 || bounds.bottom>innerHeight)document.querySelector('.puzzle-panel').scrollIntoView({block:'start',behavior:'instant'});
-    }
-  }
-  function renderBoard(clicked = -1) {
-    const focus = document.activeElement && document.activeElement.dataset.tile;
-    $('board').style.setProperty('--size', level.size);
-    $('board').dataset.level = String(level.id);
-    $('board').dataset.solved = String(network.solved);
-    const longest = Math.max(1, ...network.distance.flat().filter(Number.isFinite));
-    $('board').innerHTML = level.tiles.map((tile,i) => {
-      const moveable = !tile.fixed;
-      const on = network.live[i].some(Boolean);
-      const coordinate = `${String.fromCharCode(65 + i % level.size)}${Math.floor(i / level.size) + 1}`;
-      const name = tile.kind === 'source' ? 'Источник энергии' : tile.kind === 'home' ? `Дом, ${on ? 'свет включён' : 'ждёт света'}` : tile.kind === 'garden' ? 'Сад' : `${tile.groups.length > 1 ? 'Две независимые дуги' : 'Провод'}, ${tile.fixed ? 'закреплён' : 'повернуть'}, ${on ? 'есть питание' : 'без питания'}`;
-      const tag = moveable ? 'button' : 'div';
-      const extra = moveable ? `data-tile="${i}" data-turns="${attempt.rotations[i]}" ${network.solved || checkpointActive ? 'disabled' : ''}` : 'role="img"';
-      const guide = level.id === 1 && !network.solved && moveable && attempt.moves === 0;
-      const delays = network.distance[i].map(d => Number.isFinite(d) ? Math.round(d / longest * 600) : 0);
-      return `<${tag} class="tile ${tile.kind} ${tile.fixed ? 'fixed' : ''} ${guide ? 'suggested' : ''}" ${extra} aria-label="${coordinate}: ${name}">${A.tileArt(tile,network.groups[i],network.live[i],i,delays)}</${tag}>`;
+  function board(){
+    const focus=document.activeElement?.dataset.tile,longest=Math.max(1,...network.distance.flat().filter(Number.isFinite));
+    const el=$('board');el.style.setProperty('--size',level.size);el.parentElement.style.setProperty('--size',level.size);el.dataset.level=String(level.id);el.dataset.solved=String(network.solved);el.dataset.mode=mode;
+    $('col-labels').innerHTML=Array.from({length:level.size},(_,i)=>'<span>'+String.fromCharCode(65+i)+'</span>').join('');
+    $('row-labels').innerHTML=Array.from({length:level.size},(_,i)=>'<span>'+(i+1)+'</span>').join('');
+    el.innerHTML=level.tiles.map((tile,i)=>{
+      const on=network.live[i].some(Boolean),coordinate=String.fromCharCode(65+i%level.size)+(Math.floor(i/level.size)+1);
+      const name=t(tile.kind==='wire'&&tile.groups.length>1?'dual':tile.kind)+(tile.kind==='garden'?'':', '+t(tile.fixed?'fixed':'rotate')+', '+t(on?'powered':'dark'));
+      const tag=tile.fixed?'div':'button',attr=tile.fixed?' role="img"':' data-tile="'+i+'" data-turns="'+attempt.rotations[i]+'"'+(network.solved||busy||P.paused?' disabled':'');
+      return '<'+tag+' class="tile '+tile.kind+(tile.fixed?' fixed':'')+(level.id===1&&!attempt.moves&&!tile.fixed?' suggested':'')+'"'+attr+' aria-label="'+esc(coordinate+': '+name)+'">'+A.tileArt(tile,network.groups[i],network.live[i],i,network.distance[i].map(d=>Number.isFinite(d)?Math.round(d/longest*600):0))+'</'+tag+'>';
     }).join('');
-    const now = performance.now();
-    for (const [index, spin] of rotationsInFlight) {
-      const remaining = spin.until - now;
-      const drawing = $('board').querySelector(`[data-tile="${index}"] .tile-drawing`);
-      if (remaining <= 0 || !drawing || lessMotion()) { rotationsInFlight.delete(index); continue; }
-      const from = spin.from * remaining / 150;
-      drawing.animate([{transform:`rotate(${from}deg)`},{transform:'rotate(0deg)'}],{duration:remaining,easing:'linear'});
-    }
-    if (focus !== undefined && !network.solved) {
-      const button = $('board').querySelector(`[data-tile="${focus}"]`);
-      if (button) button.focus({preventScroll:true});
-    }
-    $('house-counter').innerHTML = A.icon('home') + `${network.powered.length} / ${network.homes.length}`;
-    $('house-counter').classList.toggle('complete', network.solved);
-    $('house-counter').setAttribute('aria-label',`Свет в ${network.powered.length} из ${network.homes.length} домов`);
-    $('lesson').innerHTML = A.icon(network.solved ? 'check' : 'bolt') + `<span>${network.solved ? 'Все дома подключены. Хорошая работа.' : level.lesson}</span>`;
-    $('moves').textContent = `${attempt.moves} ${attempt.moves % 10 === 1 && attempt.moves % 100 !== 11 ? 'поворот' : attempt.moves % 10 >= 2 && attempt.moves % 10 <= 4 && (attempt.moves % 100 < 12 || attempt.moves % 100 > 14) ? 'поворота' : 'поворотов'}`;
-    $('undo').disabled = network.solved || checkpointActive || attempt.history.length === 0;
-    $('hint').disabled = network.solved || checkpointActive;
-    $('restart').disabled = checkpointActive;
+    const now=performance.now();for(const [index,spin]of spins){const remaining=spin.until-now,drawing=el.querySelector('[data-tile="'+index+'"] .tile-drawing');if(remaining<=0||!drawing||reduced()){spins.delete(index);continue;}drawing.animate([{transform:'rotate('+(spin.from*remaining/150)+'deg)'},{transform:'rotate(0deg)'}],{duration:remaining,easing:'linear'});}
+    if(focus!==undefined&&!network.solved)el.querySelector('[data-tile="'+focus+'"]')?.focus({preventScroll:true});
+    $('house-counter').innerHTML=A.icon('home')+network.powered.length+' / '+network.homes.length;
+    $('house-counter').classList.toggle('complete',network.solved);$('house-counter').setAttribute('aria-label',t('homes',{n:network.powered.length,total:network.homes.length}));
+    $('moves').textContent=t('moves',{n:attempt.moves});$('undo').disabled=network.solved||!attempt.history.length||busy;$('hint').disabled=network.solved||busy;$('restart').disabled=busy;
   }
-  function renderTown(highlight = 0) {
-    const count = countMain();
-    $('town').innerHTML = A.town(count,state.decor,lessMotion() ? 0 : highlight);
-    $('progress-label').textContent = `${count} / 12`;
-    $('progress-fill').style.width = `${count / 12 * 100}%`;
-    const title = count === 0 ? 'Пока город дремлет' : count < 6 ? 'Свет возвращается' : count < 8 ? 'Пахнет свежим хлебом' : count < 12 ? 'Улица оживает' : 'Как хорошо дома';
-    const caption = count === 0 ? 'За каждым тёмным окном кто-то ждёт немного света.' : count < 6 ? 'В окнах всё теплее. Ещё немного — и откроется пекарня.' : count < 8 ? 'Пекарня снова открыта. А в сквере ещё ждут своего фонаря.' : count < 12 ? 'Теперь здесь можно гулять допоздна. Осталось зажечь последние окна.' : 'Все окна светятся. Этот маленький вечер — ваша работа.';
-    $('town-title').textContent = title; $('town-caption').textContent = caption;
-    $('milestones').innerHTML = [[6,'Пекарня'],[8,'Сквер'],[12,'Весь квартал']].map(([n,text]) => `<span class="milestone ${count >= n ? 'done' : ''}">${text}</span>`).join('');
-    $('decor').hidden = count < 12;
-    $('decor').querySelectorAll('button').forEach(button => {
-      button.classList.toggle('selected',button.dataset.decor === state.decor);
-      button.setAttribute('aria-pressed', String(button.dataset.decor === state.decor));
-    });
-    const max = maxUnlocked();
-    const selector = lvl => `<button class="level-choice ${state.completed.includes(lvl.id) ? 'passed' : ''} ${state.current === lvl.id ? 'current' : ''}" data-level="${lvl.id}" ${lvl.id > max ? 'disabled' : ''} ${state.current === lvl.id ? 'aria-current="step"' : ''} aria-label="${lvl.id}. ${lvl.title}${state.completed.includes(lvl.id) ? ', пройдено' : ''}">${String(lvl.id).padStart(2,'0')}</button>`;
-    $('level-list').innerHTML = levels.slice(0,12).map(selector).join('');
-    $('bonus-list').innerHTML = levels.slice(12).map(selector).join('');
-    $('bonus-section').hidden = count < 12;
+  function townArt(d,token){return globalThis.BlockDistrictArt?BlockDistrictArt.town(count(d),state.decor[d],d,I.language,state.decorUnlocked[d],token):A.town(Math.round(count(d)/20*12),state.decor[d]);}
+  function town(){const d=district(),n=count(d);$('district-name').textContent=t('district'+d);$('town').innerHTML=townArt(d,'aside');$('town-title').textContent=t(n===20?'townFinished':'townGrowing');$('town-caption').textContent=t('townText');$('district-progress').textContent=n+' / 20';$('progress-fill').style.width=n/20*100+'%';$('milestones').innerHTML=[6,13,20].map((n,i)=>'<span class="milestone '+(count(d)>=n?'done':'')+'">'+esc(t('milestone'+i))+'</span>').join('');}
+  function render(){
+    settingsText();$('level-number').textContent=mode==='daily'?t('dailyNumber',{n:level.id-1000}):t('level',{n:level.id});
+    $('level-title').textContent=I.level(level,'title');$('level-caption').textContent=I.level(level,'caption');$('lesson').textContent=I.level(level,'lesson');
+    board();town();$('lesson').hidden=network.solved;$('puzzle-actions').hidden=network.solved;$('victory').hidden=!network.solved;
+    if(network.solved){const final=mode==='campaign'&&level.id%20===0,last=mode==='campaign'&&level.id===60;const title=mode==='daily'?'dailyDone':last?'allWon':final?'districtWon':'won';$('victory').innerHTML='<div><h2>'+esc(t(title))+'</h2><p>'+esc(t(last?'allText':'completeText'))+'</p></div><div class="victory-actions"><button class="icon-button" data-action="restart" aria-label="'+esc(t('restart'))+'">'+A.icon('reset')+'</button><button class="primary" id="next" data-action="next">'+esc(t(mode==='daily'?'back':last?'town':'next'))+' '+A.icon('arrow')+'</button></div>';}
+    $('campaign-nav').classList.toggle('active',mode==='campaign');$('daily-nav').classList.toggle('active',mode==='daily');$('daily-nav').disabled=![1,2,3].every(n=>state.completed.includes(n));resize();syncPlay();
   }
-  function renderWin() {
-    $('victory').hidden = !network.solved || checkpointActive;
-    $('lesson').hidden = network.solved || checkpointActive;
-    $('puzzle-actions').hidden = network.solved || checkpointActive;
-    $('study-checkpoint').hidden = !checkpointActive;
-    if (!network.solved || checkpointActive) return;
-    const final = level.id === 12, last = level.id === levels.length;
-    const title = last ? 'До следующего вечера' : final ? 'Квартал зажжён!' : level.id === 6 ? 'Пекарня открыта!' : level.id === 8 ? 'Фонари зажглись!' : 'Вот и стало теплее';
-    const text = last ? 'Все 15 задач решены. Свет остаётся с вами.' : final ? 'Выберите гирлянду или цветы для своего квартала.' : level.id === 6 ? 'В пекарне светло. Скоро будет готов свежий хлеб.' : level.id === 8 ? 'Фонарь осветил сквер. Теперь можно гулять допоздна.' : 'Ещё одно окно вашего квартала светится.';
-    $('victory').innerHTML = `<div class="victory-copy"><div class="victory-heading"><h3>${title}</h3><button class="replay-button" data-action="replay" aria-label="Начать задачу заново" title="Начать задачу заново">${A.icon('reset')}</button></div><p>${text}</p></div><div class="victory-actions">${final?'<button class="tool-button" data-action="choose-decor">Украсить</button>':''}<button class="primary" id="next">${last ? 'Мой квартал' : final ? 'Бонусы' : 'Дальше'}${A.icon('arrow')}</button></div>`;
+  function select(id,which='campaign',reason='select'){
+    tick();const list=which==='daily'?BlockDailies:BlockLevels,lvl=list.find(l=>l.id===id);if(!lvl||which==='campaign'&&id>S.unlocked(state))return;
+    clearTimeout(waveTimer);spins.clear();$('board').classList.remove('power-wave');$('victory').style.setProperty('--win-delay','0ms');
+    cloudSelection=false;mode=which;level=lvl;if(mode==='campaign'){state.current=id;if(!['load','cloud'].includes(reason))state.currentAt=Math.max(Date.now(),state.currentAt+1);}
+    const bank=mode==='daily'?state.daily.attempts:state.attempts;attempt=bank[id]||(bank[id]={...E.fresh(level),foregroundMs:0,updatedAt:0,reported:false});
+    network=E.inspect(level,attempt.rotations);close();render();save();event('level_start',{level:id,mode,reason});
   }
-  function render(clicked = -1) { renderBoard(clicked); renderTown(); renderWin(); }
-  function playSound(win = false) {
-    if (!state.sound || document.hidden) return;
-    try {
-      if (!audioContext) audioContext = new (window.AudioContext || window.webkitAudioContext)();
-      audioContext.resume().catch(() => {});
-      (win ? [523.25,659.25,783.99] : [330 + network.powered.length * 55]).forEach((frequency,i) => {
-        const oscillator = audioContext.createOscillator(), gain = audioContext.createGain();
-        const t = audioContext.currentTime + i * .1;
-        oscillator.type = 'sine'; oscillator.frequency.value = frequency;
-        gain.gain.setValueAtTime(0,t); gain.gain.linearRampToValueAtTime(.055,t+.012); gain.gain.exponentialRampToValueAtTime(.001,t+.23);
-        oscillator.connect(gain); gain.connect(audioContext.destination); oscillator.start(t); oscillator.stop(t+.25);
-      });
-    } catch (_) { /* Audio is optional. */ }
+  function sound(win=false){if(!state.sound||document.hidden||P.paused||busy)return;try{audio=audio||new(window.AudioContext||window.webkitAudioContext)();audio.resume().catch(()=>{});(win?[523,659,784]:[330+network.powered.length*55]).forEach((frequency,i)=>{const o=audio.createOscillator(),g=audio.createGain(),at=audio.currentTime+i*.1;o.frequency.value=frequency;g.gain.setValueAtTime(0,at);g.gain.linearRampToValueAtTime(.045,at+.012);g.gain.exponentialRampToValueAtTime(.001,at+.22);o.connect(g);g.connect(audio.destination);o.start(at);o.stop(at+.24);});}catch{}}
+  function won(){const done=mode==='daily'?state.daily.completed:state.completed,first=!done.includes(level.id);if(first){done.push(level.id);done.sort((a,b)=>a-b);if(mode==='campaign'){winsSinceAd++;const d=district();if(count(d)===20)state.decorUnlocked[d]=true;}}attempt.reported=true;event(mode==='daily'?'daily_complete':'level_complete',{level:level.id,moves:attempt.moves,activeMs:Math.round(attempt.foregroundMs),hinted:!!attempt.hinted});return first;}
+  function turn(index){if(!interactive())return;tick();if(mode==='campaign')state.currentAt=Math.max(Date.now(),state.currentAt+1);const now=performance.now(),previous=spins.get(index);if(!E.turn(level,attempt,index))return;if(!reduced())spins.set(index,{from:(previous?previous.from*Math.max(0,previous.until-now)/150:0)-90,until:now+150});network=E.inspect(level,attempt.rotations);const victory=network.solved;if(victory)won();stamp();render();save();sound(victory);if(victory&&!reduced()){$('board').classList.add('power-wave');$('victory').style.setProperty('--win-delay','600ms');waveTimer=setTimeout(()=>{$('board').classList.remove('power-wave');$('victory').style.setProperty('--win-delay','0ms');},850);}}
+  function open(kind,html){tick();modalKind=kind;$('modal-content').innerHTML=html;if(!$('modal').open)$('modal').showModal();syncPlay();}
+  function close(){if($('modal').open)$('modal').close();modalKind='';syncPlay();}
+  function toast(text){clearTimeout(toastTimer);$('toast').textContent=text;$('toast').hidden=false;toastTimer=setTimeout(()=>$('toast').hidden=true,4000);}
+  function levelsMenu(){const max=S.unlocked(state);open('levels','<h2>'+esc(t('levels'))+'</h2>'+[0,1,2].map(d=>'<h3>'+esc(t('district'+d))+' · '+count(d)+'/20</h3><div class="levels-grid">'+BlockLevels.slice(d*20,d*20+20).map(l=>'<button class="level-choice '+(state.completed.includes(l.id)?'passed ':'')+(mode==='campaign'&&level.id===l.id?'current':'')+'" data-level="'+l.id+'" '+(l.id>max?'disabled':'')+' title="'+esc(I.level(l,'title'))+'" aria-label="'+esc(l.id+'. '+I.level(l,'title')+(state.completed.includes(l.id)?', '+t('finished'):''))+'">'+l.id+(state.completed.includes(l.id)?' ✓':'')+'</button>').join('')+'</div>').join(''));}
+  function districtsMenu(){open('districts','<h2>'+esc(t('map'))+'</h2>'+[0,1,2].map(d=>'<section class="district-card"><h3>'+esc(t('district'+d))+'</h3><p>'+esc(t('districtProgress',{n:count(d)}))+'</p>'+townArt(d,'modal-'+d)+(state.decorUnlocked[d]?'<div class="decor-actions">'+['garland','flowers'].map(v=>'<button data-decor="'+v+'" data-district="'+d+'" class="'+(state.decor[d]===v?'selected':'')+'" aria-pressed="'+(state.decor[d]===v)+'">'+esc(t(v))+'</button>').join('')+'</div>':'')+'</section>').join(''));}
+  function availableDaily(){const epoch=Date.parse((globalThis.BlockRelease?.dailyEpoch||'2026-09-21')+'T00:00:00Z');return Math.max(0,Math.min(BlockDailies.length,Math.floor((P.serverNow()-epoch)/86400000)+1));}
+  function dailyMenu(){if(![1,2,3].every(n=>state.completed.includes(n))){toast(t('dailyLocked'));return;}const n=availableDaily();open('daily','<h2>'+esc(t(n>=14?'archive':'daily'))+'</h2><p>'+esc(t(n>=14?'dailyEnd':'dailyIntro'))+'</p><div class="levels-grid">'+BlockDailies.map((l,i)=>'<button data-daily="'+l.id+'" class="level-choice '+(state.daily.completed.includes(l.id)?'passed':'')+'" '+(i>=n?'disabled':'')+' aria-label="'+esc(I.level(l,'title'))+'">'+(i+1)+(state.daily.completed.includes(l.id)?' ✓':'')+'</button>').join('')+'</div>');}
+  function hintMenu(){if(mode==='campaign')state.currentAt=Math.max(Date.now(),state.currentAt+1);const openHint=level.id<=15||state.hints[level.id],free=!Object.keys(state.hints).some(id=>Number(id)>15)||!P.active;event('hint_request',{level:level.id});if(openHint){attempt.hinted=true;stamp();save();open('hint','<h2>'+esc(t('firstHint'))+'</h2><p class="hint-copy">'+esc(I.level(level,'hint'))+'</p><p>'+esc(I.level(level,'lesson'))+'</p>');return;}open('hint','<h2>'+esc(t('firstHint'))+'</h2><p>'+esc(I.level(level,'lesson'))+'</p><p>'+esc(t(free?'firstHintGift':'adHintText'))+'</p><div class="modal-actions"><button data-action="grant-hint" class="primary">'+esc(t(free?'freeHint':'adHint'))+'</button><button data-action="close">'+esc(t('continue'))+'</button></div>');}
+  async function grantHint(){if(busy||modalKind!=='hint')return;const targetId=level.id;const free=targetId<=15||state.hints[targetId]||!Object.keys(state.hints).some(id=>Number(id)>15)||!P.active;busy=true;syncPlay();try{const result=free?{rewarded:true}:await P.rewarded();if(result.rewarded){state.hints[targetId]=true;attempt.hinted=true;stamp();save();event('hint_granted',{level:targetId,rewarded:!free});}else toast(t('noAd'));}catch{toast(t('noAd'));}finally{busy=false;render();if(state.hints[targetId])hintMenu();else close();}}
+  function settingsMenu(){open('settings','<h2>'+esc(t('settings'))+'</h2><div class="setting-row"><span>'+esc(t('language'))+'</span><select id="language-select" aria-label="'+esc(t('language'))+'">'+[['auto',t('automatic')],['ru','Русский'],['en','English']].map(([v,label])=>'<option value="'+v+'" '+(state.language===v?'selected':'')+'>'+esc(label)+'</option>').join('')+'</select></div><div class="setting-row"><label><input type="checkbox" id="motion-input" '+(state.reducedMotion?'checked':'')+'>'+esc(t('motion'))+'</label></div><h3>'+esc(t('rulesTitle'))+'</h3><p>'+esc(t('rules'))+'</p><p class="small">'+esc(t('keys'))+'</p><h3>'+esc(t('import'))+'</h3><p class="small">'+esc(t('transfer'))+'</p><div class="modal-actions"><button data-action="export">'+esc(t('export'))+'</button><button data-action="import">'+esc(t('import'))+'</button></div><input type="file" id="import-file" accept=".json,application/json" hidden>'+(P.active?'<div class="modal-actions"><button data-action="sync">'+esc(t('retry'))+'</button></div>':'')+'<p class="small">'+esc(t('version'))+' '+BUILD+'</p>');}
+  function download(){tick();save();const blob=new Blob([JSON.stringify({game:'light-the-block',build:BUILD,save:state})],{type:'application/json'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='light-the-block-progress.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),10000);}
+  async function importFile(file){if(!file||busy)return;busy=true;syncPlay();try{if(file.size>1000000)throw Error('Too large');const raw=JSON.parse(await file.text()),value=raw.game==='light-the-block'?raw.save:raw;if(!value||![1,2].includes(value.version)||!Array.isArray(value.completed))throw Error('Wrong save');state=S.merge(state,S.clean(value));select(state.current,'campaign','import');toast(t('importOK'));}catch{toast(t('importError'));}finally{busy=false;render();}}
+  async function next(){if(busy||!network.solved)return;if(mode==='daily'){select(state.current);return;}if(level.id===60){districtsMenu();return;}const id=level.id+1;busy=true;syncPlay();try{if(P.active&&state.completed.length>=5&&activeMs>=180000&&winsSinceAd>=3&&activeMs-lastAdMs>=180000){lastAdMs=activeMs;winsSinceAd=0;event('ad_request',{kind:'fullscreen'});await P.fullscreen();}}catch{}finally{busy=false;select(id);}}
+  async function action(name){
+    if(busy&&name!=='close')return;
+    if(name==='close'){if(!busy)close();return;}
+    if(P.paused)return;
+    if(name==='levels')levelsMenu();else if(name==='districts')districtsMenu();else if(name==='daily')dailyMenu();else if(name==='settings')settingsMenu();
+    else if(name==='sound'){state.sound=!state.sound;state.settingsAt=Math.max(Date.now(),state.settingsAt+1);save();render();sound();}
+    else if(name==='hint')hintMenu();else if(name==='grant-hint')await grantHint();else if(name==='next')await next();
+    else if(name==='undo'){if(!network.solved&&E.undo(attempt)){tick();spins.clear();network=E.inspect(level,attempt.rotations);stamp();render();save();}}
+    else if(name==='restart')open('restart','<h2>'+esc(t('confirmRestart'))+'</h2><p>'+esc(t('restartText'))+'</p><div class="modal-actions"><button class="primary" data-action="confirm-restart">'+esc(t('restart'))+'</button><button data-action="close">'+esc(t('cancel'))+'</button></div>');
+    else if(name==='confirm-restart'){attempt={...E.fresh(level),foregroundMs:0,updatedAt:Math.max(Date.now(),attempt.updatedAt+1),reported:false};(mode==='daily'?state.daily.attempts:state.attempts)[level.id]=attempt;select(level.id,mode,'restart');}
+    else if(name==='export')download();else if(name==='import')$('import-file').click();else if(name==='sync'){P.retrySync();toast(t('cloudPending'));}
   }
-  function complete() {
-    if (!network.solved) return false;
-    const firstCompletion = !state.completed.includes(level.id);
-    if (!state.completed.includes(level.id)) {
-      state.completed.push(level.id); state.completed.sort((a,b)=>a-b);
-      if ([6,8,12].includes(level.id)) log('district_unlock', {level:level.id});
-    }
-    if (!attempt.reported) {
-      log('level_complete',{level:level.id,attempt:attempt.number,foregroundMs:Math.round(attempt.foregroundMs),turns:attempt.turns,undos:attempt.undos,hinted:attempt.hinted});
-      attempt.reported = true;
-    }
-    return firstCompletion;
-  }
-  function maybeCheckpoint() {
-    if (!testing || journal.checkpointChoice || checkpointActive) return;
-    if (journal.checkpointOffered || [1,2,3].every(n => state.completed.includes(n))) checkpoint(journal.checkpointReason || 'three_levels');
-  }
-  function celebrate(firstCompletion) {
-    $('victory').style.setProperty('--win-delay',lessMotion()?'0ms':'600ms');
-    if (!lessMotion()) {
-      $('board').classList.add('power-wave');
-      clearTimeout(waveTimer); waveTimer = setTimeout(()=>{$('board').classList.remove('power-wave');$('victory').style.setProperty('--win-delay','0ms');},850);
-    }
-    if (firstCompletion && level.id <= 12) {
-      renderTown(level.id);
-      clearTimeout(townTimer); townTimer=setTimeout(()=>{$('town').querySelectorAll('.town-new').forEach(el=>el.classList.remove('town-new'));},1600);
-    }
-    maybeCheckpoint();
-  }
-  $('board').addEventListener('click', event => {
-    const button = event.target.closest('[data-tile]');
-    if (!button) return;
-    if (network.solved || button.disabled) return;
-    if(!beforeAction())return;
-    if ($('modal').open) return;
-    const i = Number(button.dataset.tile);
-    if (!lessMotion()) {
-      const now = performance.now(), previous = rotationsInFlight.get(i);
-      const residual = previous ? previous.from * Math.max(0, previous.until-now)/150 : 0;
-      rotationsInFlight.set(i,{from:residual-90,until:now+150});
-    }
-    if (!E.turn(level,attempt,i)) return;
-    attempt.turns++; network = E.inspect(level,attempt.rotations); const firstCompletion=complete(); playSound(network.solved);
-    render(i); save();
-    if(network.solved)celebrate(firstCompletion);
-  });
-  $('board').addEventListener('keydown', event => {
-    const step = {ArrowLeft:-1,ArrowRight:1,ArrowUp:-level.size,ArrowDown:level.size}[event.key];
-    if (!step || !event.target.dataset.tile) return;
-    event.preventDefault();
-    let i = Number(event.target.dataset.tile) + step;
-    while (i >= 0 && i < level.tiles.length) {
-      const button = $('board').querySelector(`[data-tile="${i}"]:not(:disabled)`);
-      if (button) { button.focus(); break; }
-      i += step;
-    }
-  });
-  $('undo').addEventListener('click', () => {
-    if(!beforeAction())return;
-    if(network.solved)return;
-    rotationsInFlight.clear();
-    if (!E.undo(attempt)) return;
-    attempt.undos++; network = E.inspect(level,attempt.rotations); viewingSolved = false;
-    log('undo',{level:level.id,attempt:attempt.number});render();save();
-  });
-  function restart() {
-    if(!beforeAction())return;
-    log('level_restart',{level:level.id,attempt:attempt.number});
-    clearTimeout(waveTimer);$('board').classList.remove('power-wave');rotationsInFlight.clear();
-    attempt = newAttempt(level,attempt.number+1); state.attempts[level.id] = attempt;
-    network = E.inspect(level,attempt.rotations);viewingSolved=false;$('hint-text').hidden=true;
-    log('level_start',{level:level.id,attempt:attempt.number,reason:'restart'});render();save();
-  }
-  $('restart').addEventListener('click', () => {
-    if (!attempt.moves) { restart(); return; }
-    modal('<h2 class="modal-content-title">Начать эту задачу заново?</h2><p>Провода вернутся в исходное положение. Уже открытые истории и огоньки квартала сохранятся.</p><div class="modal-buttons"><button class="primary" data-action="restart-confirm">Начать заново</button><button class="tool-button" data-action="close">Продолжить решение</button></div>');
-  });
-  $('hint').addEventListener('click', () => {
-    if(!beforeAction())return;
-    if (!attempt.hinted) log('hint_used',{level:level.id,attempt:attempt.number});
-    attempt.hinted=true;$('hint-text').textContent=level.hint;$('hint-text').hidden=!$('hint-text').hidden;save();
-  });
-  function proceed() {
-    if (level.id === levels.length) { $('town').scrollIntoView({behavior:lessMotion()?'auto':'smooth',block:'center'}); return; }
-    setLevel(level.id+1,'next');
-  }
-  $('victory').addEventListener('click', event => {
-    if(event.target.closest('#next')) proceed();
-  });
-  for (const id of ['level-list','bonus-list']) $(id).addEventListener('click',event=>{const button=event.target.closest('[data-level]');if(button&&!button.disabled)setLevel(Number(button.dataset.level));});
-  $('decor').addEventListener('click',event=>{const button=event.target.closest('[data-decor]');if(!button)return;state.decor=button.dataset.decor;log('decor_choice',{choice:state.decor});renderTown();save();});
-  function renderSettings(){
-    $('sound').innerHTML=A.icon(state.sound?'sound':'mute');$('sound').setAttribute('aria-label',state.sound?'Выключить звук':'Включить звук');$('sound').title=state.sound?'Выключить звук':'Включить звук';
-    document.documentElement.classList.toggle('reduced-motion',state.reducedMotion);
-    if(lessMotion()){
-      clearTimeout(waveTimer);clearTimeout(townTimer);rotationsInFlight.clear();
-      $('board').classList.remove('power-wave');$('victory').style.setProperty('--win-delay','0ms');
-      $('town').querySelectorAll('.town-new').forEach(el=>el.classList.remove('town-new'));
-      document.getAnimations().forEach(animation=>animation.cancel());
-    }
-  }
-  motionQuery.addEventListener('change',renderSettings);
-  $('sound').addEventListener('click',()=>{state.sound=!state.sound;renderSettings();if(state.sound)playSound();else if(audioContext)audioContext.suspend().catch(()=>{});save();});
-  function modal(html, priority = false) {
-    if(!priority && !beforeAction())return;
-    $('modal-content').innerHTML=html;if(!$('modal').open)$('modal').showModal();
-    if(audioContext)audioContext.suspend().catch(()=>{});
-  }
-  function returnNormal(){
-    returnNormalOnClose=false;testing=false;checkpointActive=false;
-    $('modal-close').hidden=false;stateKey=MAIN_KEY;state=cleanState(read(MAIN_KEY));
-    setLevel(state.current,'return_normal');renderSettings();
-  }
-  function closeModal(){if($('modal').open)$('modal').close();if(returnNormalOnClose)returnNormal();lastClock=performance.now();}
-  $('modal-close').addEventListener('click',closeModal);
-  $('modal').addEventListener('close',()=>{if(returnNormalOnClose)returnNormal();lastClock=performance.now();});
-  $('modal').addEventListener('cancel',event=>{if(checkpointActive)event.preventDefault();});
-  $('help').addEventListener('click',()=>modal(`<h2 class="modal-content-title">Пара поворотов —<br>и станет светлее.</h2><p>Нажимайте на провода, чтобы повернуть их на 90°. Соедините станцию со всеми домами одновременно.</p><ul><li>Концы соседних проводов должны смотреть друг на друга.</li><li>Дом можно временно погасить и перестроить путь.</li><li>Провод с заклёпкой не вращается.</li><li>Две дуги в одной клетке проводят свет независимо.</li></ul><p>Отменяйте ходы, пробуйте снова, пользуйтесь подсказкой. Штрафов и таймера нет.</p><label><input id="reduce-motion" type="checkbox" ${state.reducedMotion?'checked':''}>Меньше анимации</label><p class="small">Прогресс хранится только в этом браузере. При очистке данных или смене устройства он не переносится.</p><button class="primary" data-action="close">Всё понятно</button>`));
-  function toolsModal(){
-    tick();
-    const text=journal?`${journal.events.length} событий · ${Math.round(journal.foregroundMs/1000)} сек. при видимой игре${journal.dropped?' · журнал обрезан':''}${!logOK?' · запись в хранилище недоступна':''}`:'Запись наблюдений ещё не начата.';
-    modal(`<h2 class="modal-content-title">Дневник теста</h2><p>Для наблюдения за новым игроком. Все записи остаются в этом браузере; отправки на сервер нет.</p><p class="test-status">${text}</p><p class="small">Новый тест начинает отдельное прохождение. Ваш обычный квартал сохраняется. Предыдущий дневник будет заменён — сначала скачайте его, если он нужен.</p><div class="modal-buttons"><button class="primary" data-action="new-test">Новый тест</button>${journal?'<button class="tool-button" data-action="export">Скачать JSON</button>':''}${testing?'<button class="tool-button" data-action="finish-test">Закончить тест</button>':''}</div>`);
-  }
-  $('test-tools').addEventListener('click',toolsModal);
-  function startTest(){
-    closeModal();checkpointActive=false;testing=true;stateKey=STUDY_KEY;
-    journal={schemaVersion:1,buildId:BUILD,levelSetVersion:1,testRunId:Math.random().toString(36).slice(2,12),seq:0,foregroundMs:0,events:[],dropped:0,checkpointOffered:false,checkpointChoice:null,running:true,completed:false};
-    state=freshState();log('session_start',{mode:'new_test',buildId:BUILD});setLevel(1,'test_start');renderSettings();log('game_ready');
-  }
-  function exportLog(){
-    tick();saveLog();
-    if(!journal)return;
-    const data={...journal,truncated:journal.dropped>0,summary:journal.summary||{completedLevels:[...state.completed],currentLevel:state.current},note:'Время при видимой игре; без фона и открытых окон. Закрытие вкладки не доказывает отказ. Данные этого браузера, без облачной синхронизации.'};
-    const url=URL.createObjectURL(new Blob([JSON.stringify(data,null,2)],{type:'application/json'}));
-    const link=document.createElement('a');link.href=url;link.download=`light-block-test-${journal.testRunId}.json`;document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),1000);
-  }
-  function checkpoint(reason){
-    if(!testing||journal.checkpointChoice)return;
-    checkpointActive=true;
-    if($('modal').open)$('modal').close();
-    if(!journal.checkpointOffered){journal.checkpointOffered=true;journal.checkpointReason=reason;log('checkpoint_shown',{reason});}
-    $('study-checkpoint').innerHTML='<p>Спасибо за первые огоньки. Продолжим прогулку?</p><div class="checkpoint-actions"><button class="tool-button" data-action="checkpoint-stop">Закончить</button><button class="tool-button" data-action="checkpoint-continue">Продолжить</button></div>';
-    renderBoard();renderWin();lastClock=performance.now();
-  }
-  function finishTest(){
-    tick();
-    checkpointActive=false;$('modal-close').hidden=false;
-    log('test_finish',{level:level.id});journal.completed=true;journal.running=false;journal.summary={completedLevels:[...state.completed],currentLevel:state.current};saveLog();
-    testing=false;
-    returnNormalOnClose=true;
-    modal('<h2 class="modal-content-title">Спасибо за прогулку.</h2><p>Что побуждало открыть следующую задачу? Где стало непонятно или скучно?</p><p class="small">Ответы обсудите с наблюдателем. Дневник можно скачать для разбора.</p><div class="modal-buttons"><button class="primary" data-action="export">Скачать дневник</button><button class="tool-button" data-action="return-normal">Мой квартал</button></div>');
-  }
-  $('modal-content').addEventListener('change',event=>{if(event.target.id==='reduce-motion'){state.reducedMotion=event.target.checked;renderSettings();save();}});
-  document.addEventListener('click',event=>{
-    const button=event.target.closest('[data-action]');if(!button)return;
-    switch(button.dataset.action){
-      case 'close':closeModal();break;
-      case 'restart-confirm':closeModal();restart();break;
-      case 'new-test':
-        if(journal)modal('<h2 class="modal-content-title">Начать новый тест?</h2><p>Текущий дневник будет заменён. Скачайте его, если хотите сохранить запись.</p><div class="modal-buttons"><button class="tool-button" data-action="export">Скачать JSON</button><button class="primary" data-action="confirm-new-test">Начать новый</button><button class="tool-button" data-action="close">Отмена</button></div>');
-        else startTest();break;
-      case 'confirm-new-test':startTest();break;
-      case 'export':exportLog();break;
-      case 'finish-test':finishTest();break;
-      case 'checkpoint-stop':journal.checkpointChoice='stop';log('checkpoint_choice',{choice:'stop'});finishTest();break;
-      case 'checkpoint-continue':journal.checkpointChoice='continue';log('checkpoint_choice',{choice:'continue'});checkpointActive=false;closeModal();if(journal.nextLevel)setLevel(journal.nextLevel,'checkpoint');else if(network.solved)proceed();else render();break;
-      case 'return-normal':closeModal();break;
-      case 'replay':$('restart').click();break;
-      case 'choose-decor':
-        modal('<h2 class="modal-content-title">Ваш последний штрих</h2><p>Что добавим на вечернюю улицу?</p><div class="modal-buttons"><button class="tool-button" data-action="pick-garland">Гирлянду</button><button class="tool-button" data-action="pick-flowers">Цветы</button></div>');break;
-      case 'pick-garland':case 'pick-flowers':state.decor=button.dataset.action==='pick-garland'?'garland':'flowers';log('decor_choice',{choice:state.decor});renderTown();save();closeModal();break;
-    }
-  });
-  document.addEventListener('visibilitychange',()=>{
-    // Visibility has already changed: settle the preceding visible interval before pausing.
-    if(document.hidden&&!$('modal').open&&!checkpointActive&&attempt&&!network.solved){const elapsed=performance.now()-lastClock;attempt.foregroundMs+=elapsed;if(testing)journal.foregroundMs+=elapsed;}
-    lastClock=performance.now();log('visibility_change',{hidden:document.hidden});save();saveLog();
-    if(document.hidden&&audioContext)audioContext.suspend().catch(()=>{});
-  });
-  window.addEventListener('pagehide',()=>{tick();save();saveLog();});
-  document.querySelectorAll('[data-icon]').forEach(el=>el.innerHTML=A.icon(el.dataset.icon));
-  document.documentElement.dataset.build=BUILD;
-  log('session_start',{mode:'resume_test',buildId:BUILD});
-  setLevel(state.current,'load');renderSettings();log('game_ready');
-  maybeCheckpoint();
-  setInterval(()=>{tick();if(testing&&!journal.checkpointOffered&&journal.foregroundMs>=300000)checkpoint('five_minutes');},1000);
-  setInterval(()=>{save();if(testing)saveLog();},10000);
-  if(new URLSearchParams(location.search).has('test')&&!testing)toolsModal();
+  document.addEventListener('click',e=>{if(!state)return;if((busy||P.paused)&&!e.target.closest('[data-action="close"]'))return;const tile=e.target.closest('[data-tile]');if(tile){turn(Number(tile.dataset.tile));return;}const chosen=e.target.closest('button[data-level]');if(chosen&&!chosen.disabled&&!busy){select(Number(chosen.dataset.level));return;}const daily=e.target.closest('[data-daily]');if(daily&&!daily.disabled&&!busy){select(Number(daily.dataset.daily),'daily');return;}const decor=e.target.closest('[data-decor]');if(decor&&!busy){const d=Number(decor.dataset.district);if(state.decorUnlocked[d]){state.decor[d]=decor.dataset.decor;state.settingsAt=Math.max(Date.now(),state.settingsAt+1);save();town();districtsMenu();}return;}const button=e.target.closest('[data-action]');if(button&&!button.disabled)action(button.dataset.action);});
+  document.addEventListener('change',e=>{if(!state||busy||P.paused)return;if(e.target.id==='language-select'){state.language=e.target.value;state.settingsAt=Math.max(Date.now(),state.settingsAt+1);save();render();settingsMenu();}else if(e.target.id==='motion-input'){state.reducedMotion=e.target.checked;state.settingsAt=Math.max(Date.now(),state.settingsAt+1);save();render();}else if(e.target.id==='import-file')importFile(e.target.files[0]);});
+  $('board').addEventListener('keydown',e=>{const current=e.target.closest('[data-tile]');if(!current||!['ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key))return;e.preventDefault();const step={ArrowLeft:-1,ArrowRight:1,ArrowUp:-level.size,ArrowDown:level.size}[e.key];let i=Number(current.dataset.tile)+step;while(i>=0&&i<level.tiles.length){const b=$('board').querySelector('[data-tile="'+i+'"]');if(b&&!b.disabled){b.focus();break;}i+=step;}});
+  document.addEventListener('contextmenu',e=>e.preventDefault());$('board').addEventListener('dragstart',e=>e.preventDefault());
+  $('modal').addEventListener('cancel',e=>{if(busy){e.preventDefault();return;}modalKind='';});$('modal').addEventListener('close',()=>{if($('modal').open)return;modalKind='';if(cloudSelection&&!busy){cloudSelection=false;select(state.current,'campaign','cloud');}else syncPlay();});
+  document.addEventListener('visibilitychange',()=>{tick();if(state&&attempt){save();}syncPlay();});addEventListener('pagehide',()=>{if(state&&attempt){save();}});
+  motion.addEventListener('change',()=>{if(state)render();});new ResizeObserver(resize).observe(document.querySelector('.board-area'));
+  P.onPause(()=>{if(state){syncPlay();board();}});P.onStatus(()=>{if(state)status();});
+  P.onCloud(raw=>{if(!state){cloudWaiting=raw;return;}if(raw||P.saveKey!==loadedSaveKey){tick();if(P.saveKey!==loadedSaveKey){state=S.merge(state,read(P.saveKey));loadedSaveKey=P.saveKey;}state=S.merge(state,raw);if(mode==='campaign'){if($('modal').open||busy)cloudSelection=state.current!==level.id;else level=BlockLevels[state.current-1];}const bank=mode==='daily'?state.daily.attempts:state.attempts;attempt=bank[level.id]||(bank[level.id]={...E.fresh(level),foregroundMs:0,updatedAt:0,reported:false});network=E.inspect(level,attempt.rotations);render();}save();});
+  try{
+    await P.init();loadedSaveKey=P.saveKey;state=S.clean(read(P.saveKey)||(!P.active?read('light-block:progress:v1'):null));
+    if(cloudWaiting)state=S.merge(state,cloudWaiting);
+    $('boot').hidden=true;$('app').hidden=false;document.documentElement.dataset.build=BUILD;
+    select(state.current,'campaign','load');P.ready();event('game_ready');setInterval(tick,500);setInterval(()=>{if(state&&attempt&&interactive()){save();}},10000);
+    globalThis.BlockGame={getState:()=>structuredClone(state),getLevel:()=>level.id,getMode:()=>mode};
+  }catch(error){$('boot').hidden=false;$('app').hidden=true;$('boot').textContent=t('errorBoot');console.error(error);}
 })();
