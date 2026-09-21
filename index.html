@@ -20,19 +20,23 @@
       <div class="header-actions"><button id="sound" class="icon-button" aria-label="Включить звук" title="Включить звук" data-icon="mute"></button><button id="help" class="icon-button" aria-label="Как играть" title="Как играть" data-icon="help"></button></div>
     </header>
     <main>
-      <div class="intro"><div><p class="eyebrow"><span class="tiny-sun"></span> УЛИЦА ТЁПЛЫХ ОКОН</p><h1>Вечер начинается со света.</h1></div><p class="intro-note">Никуда не спешите.<br>Здесь всё решается одним поворотом.</p></div>
+      <div class="intro"><h1>Вечер начинается со света.</h1><p class="intro-note">Соединяйте провода. Зажигайте окна.</p></div>
       <div class="game-layout">
         <section class="puzzle-panel" aria-label="Головоломка">
           <div class="level-heading"><div><p class="eyebrow" id="level-number"></p><h2 id="level-title"></h2></div><span class="house-counter" id="house-counter" aria-live="polite"></span></div>
           <p class="level-caption" id="level-caption"></p>
-          <div class="board-wrap"><div id="board" class="board" aria-label="Игровое поле"></div><div id="victory" class="victory" hidden aria-live="polite"></div></div>
-          <div class="lesson" id="lesson" aria-live="polite"></div>
-          <div class="puzzle-actions"><button id="undo" class="tool-button"><span data-icon="undo"></span>Отменить</button><button id="restart" class="tool-button"><span data-icon="reset"></span>Заново</button><button id="hint" class="tool-button hint-button"><span data-icon="bolt"></span>Подсказка</button></div>
+          <div class="board-wrap"><div id="board" class="board" aria-label="Игровое поле"></div></div>
+          <div class="feedback">
+            <div class="lesson" id="lesson" aria-live="polite"></div>
+            <div class="puzzle-actions" id="puzzle-actions"><button id="undo" class="tool-button"><span data-icon="undo"></span>Отменить</button><button id="restart" class="tool-button"><span data-icon="reset"></span>Заново</button><button id="hint" class="tool-button hint-button"><span data-icon="bolt"></span>Подсказка</button></div>
+            <div id="victory" class="victory" hidden aria-live="polite"></div>
+            <section id="study-checkpoint" class="checkpoint-panel" hidden aria-label="Продолжение теста"></section>
+          </div>
           <p id="hint-text" class="hint-text" hidden></p>
           <div class="puzzle-meta"><span id="moves">0 поворотов</span><span id="save-status">Прогресс сохраняется на этом устройстве</span></div>
         </section>
         <aside class="neighborhood" aria-label="Ваш квартал">
-          <div class="town-card"><div class="town-top"><span class="eyebrow">ВАШ КВАРТАЛ</span><span class="chapter-tag">01</span></div><div id="town" class="town-art"></div><div class="town-copy"><h2 id="town-title">Пока город дремлет</h2><p id="town-caption">За каждым тёмным окном кто-то ждёт немного света.</p><div class="progress-label"><span>Тёплые огоньки</span><strong id="progress-label">0 / 12</strong></div><div class="progress-track"><span id="progress-fill"></span></div><div id="milestones" class="milestones"></div><div id="decor" class="decor" hidden><p>Добавим последний штрих?</p><button data-decor="garland">Гирлянда</button><button data-decor="flowers">Цветы</button></div></div></div>
+          <div class="town-card"><div class="town-top"><span class="eyebrow">ВАШ КВАРТАЛ</span><span class="evening-mark" aria-hidden="true">☾</span></div><div id="town" class="town-art"></div><div class="town-copy"><h2 id="town-title">Пока город дремлет</h2><p id="town-caption">За каждым тёмным окном кто-то ждёт немного света.</p><div class="progress-label"><span>Тёплые огоньки</span><strong id="progress-label">0 / 12</strong></div><div class="progress-track"><span id="progress-fill"></span></div><div id="milestones" class="milestones"></div><div id="decor" class="decor" hidden><p>Добавим последний штрих?</p><button data-decor="garland">Гирлянда</button><button data-decor="flowers">Цветы</button></div></div></div>
           <div class="level-selector"><div class="selector-heading"><h3>Прогулка по улице</h3><span>12 историй</span></div><div id="level-list" class="level-list"></div><div id="bonus-section" hidden><p class="bonus-label">ЕЩЁ НЕМНОГО СВЕТА</p><div id="bonus-list" class="level-list bonus-list"></div></div></div>
           <p class="quiet-note"><span data-icon="leaf"></span>Без таймера. Без суеты. В вашем темпе.</p>
         </aside>

@@ -11,9 +11,10 @@
   function inspect(level, rotations) {
     const groups = level.tiles.map((tile, i) => groupsAt(tile, rotations[i] || 0));
     const live = groups.map(list => list.map(() => false));
+    const distance = groups.map(list => list.map(() => Infinity));
     const queue = [];
     level.tiles.forEach((tile, i) => {
-      if (tile.kind === 'source') groups[i].forEach((_, g) => { live[i][g] = true; queue.push([i, g]); });
+      if (tile.kind === 'source') groups[i].forEach((_, g) => { live[i][g] = true; distance[i][g] = 0; queue.push([i, g]); });
     });
     for (let q = 0; q < queue.length; q++) {
       const [i, g] = queue[q];
@@ -26,6 +27,7 @@
         groups[j].forEach((mask, h) => {
           if ((mask & directions[(d + 2) % 4]) && !live[j][h]) {
             live[j][h] = true;
+            distance[j][h] = distance[i][g] + 1;
             queue.push([j, h]);
           }
         });
@@ -33,7 +35,7 @@
     }
     const homes = level.tiles.map((tile, i) => tile.kind === 'home' ? i : -1).filter(i => i >= 0);
     const powered = homes.filter(i => live[i].some(Boolean));
-    return { groups, live, homes, powered, solved: homes.length > 0 && homes.length === powered.length };
+    return { groups, live, distance, homes, powered, solved: homes.length > 0 && homes.length === powered.length };
   }
   function expand(points) {
     const result = [points[0]];
@@ -81,7 +83,7 @@
     }
     const initial = tiles.map(() => 0);
     for (const [r, c, turns] of spec.scramble || []) initial[index([r, c])] = turns;
-    const level = { ...spec, tiles, initial, solution: tiles.map(() => 0), version: 1 };
+    const level = { ...spec, tiles, initial, solution: tiles.map(() => 0), version: Number.isSafeInteger(spec.version) && spec.version > 0 ? spec.version : 1 };
     if (!inspect(level, level.solution).solved) throw new Error('Invalid reference solution: ' + spec.id);
     if (inspect(level, initial).solved) {
       const target = tiles.findIndex(tile => !tile.fixed);

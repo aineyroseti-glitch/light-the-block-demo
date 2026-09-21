@@ -1,9 +1,13 @@
 (function () {
   'use strict';
   const E = BlockEngine, A = BlockArt, levels = BlockLevels;
-  const BUILD = '0.1.0', MAIN_KEY = 'light-block:progress:v1', STUDY_KEY = 'light-block:study-progress:v1', LOG_KEY = 'light-block:study-log:v1';
+  const BUILD = '0.2.0', MAIN_KEY = 'light-block:progress:v1', STUDY_KEY = 'light-block:study-progress:v1', LOG_KEY = 'light-block:study-log:v1';
   const $ = id => document.getElementById(id);
   let storageOK = true, logOK = true, audioContext, lastClock = performance.now(), checkpointActive = false;
+  let returnNormalOnClose = false, waveTimer = 0, townTimer = 0;
+  const motionQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+  const lessMotion = () => state.reducedMotion || motionQuery.matches;
+  const rotationsInFlight = new Map();
   const freshState = () => ({ version:1,current:1,completed:[],attempts:{},sound:false,decor:'garland',reducedMotion:false });
   function read(key) {
     try { const raw = localStorage.getItem(key); return raw ? JSON.parse(raw) : null; }
@@ -86,7 +90,7 @@
   function tick() {
     const now = performance.now(), elapsed = now - lastClock;
     lastClock = now;
-    if (document.hidden || $('modal').open || !attempt || network.solved) return;
+    if (document.hidden || $('modal').open || checkpointActive || !attempt || network.solved) return;
     attempt.foregroundMs += elapsed;
     if (testing) {
       journal.foregroundMs += elapsed;
@@ -102,6 +106,10 @@
     if(!['load','test_start','return_normal'].includes(reason) && !beforeAction())return;
     if(reason!=='load' && testing && id>3 && !journal.checkpointChoice && [1,2,3].every(n=>state.completed.includes(n))){journal.nextLevel=id;checkpoint('three_levels');return;}
     if (!Number.isInteger(id) || id < 1 || id > maxUnlocked()) return;
+    clearTimeout(waveTimer); clearTimeout(townTimer);
+    rotationsInFlight.clear();
+    $('board').classList.remove('power-wave');
+    $('victory').style.setProperty('--win-delay','0ms');
     state.current = id;
     level = levels[id - 1];
     const existed = !!state.attempts[id];
@@ -114,22 +122,37 @@
     $('level-caption').textContent = level.caption;
     log(existed ? 'level_resume' : 'level_start', {level:id,attempt:attempt.number,reason});
     render(); save();
+    maybeCheckpoint();
+    if(reason!=='load'){
+      const bounds=$('board').getBoundingClientRect();
+      if(bounds.top<0 || bounds.bottom>innerHeight)document.querySelector('.puzzle-panel').scrollIntoView({block:'start',behavior:'instant'});
+    }
   }
   function renderBoard(clicked = -1) {
     const focus = document.activeElement && document.activeElement.dataset.tile;
     $('board').style.setProperty('--size', level.size);
     $('board').dataset.level = String(level.id);
     $('board').dataset.solved = String(network.solved);
+    const longest = Math.max(1, ...network.distance.flat().filter(Number.isFinite));
     $('board').innerHTML = level.tiles.map((tile,i) => {
       const moveable = !tile.fixed;
       const on = network.live[i].some(Boolean);
       const coordinate = `${String.fromCharCode(65 + i % level.size)}${Math.floor(i / level.size) + 1}`;
       const name = tile.kind === 'source' ? 'Источник энергии' : tile.kind === 'home' ? `Дом, ${on ? 'свет включён' : 'ждёт света'}` : tile.kind === 'garden' ? 'Сад' : `${tile.groups.length > 1 ? 'Две независимые дуги' : 'Провод'}, ${tile.fixed ? 'закреплён' : 'повернуть'}, ${on ? 'есть питание' : 'без питания'}`;
       const tag = moveable ? 'button' : 'div';
-      const extra = moveable ? `data-tile="${i}" data-turns="${attempt.rotations[i]}" ${network.solved ? 'disabled' : ''}` : 'role="img"';
+      const extra = moveable ? `data-tile="${i}" data-turns="${attempt.rotations[i]}" ${network.solved || checkpointActive ? 'disabled' : ''}` : 'role="img"';
       const guide = level.id === 1 && !network.solved && moveable && attempt.moves === 0;
-      return `<${tag} class="tile ${tile.kind} ${tile.fixed ? 'fixed' : ''} ${i === clicked ? 'clicked' : ''} ${guide ? 'suggested' : ''}" ${extra} aria-label="${coordinate}: ${name}">${A.tileArt(tile,network.groups[i],network.live[i],i)}</${tag}>`;
+      const delays = network.distance[i].map(d => Number.isFinite(d) ? Math.round(d / longest * 600) : 0);
+      return `<${tag} class="tile ${tile.kind} ${tile.fixed ? 'fixed' : ''} ${guide ? 'suggested' : ''}" ${extra} aria-label="${coordinate}: ${name}">${A.tileArt(tile,network.groups[i],network.live[i],i,delays)}</${tag}>`;
     }).join('');
+    const now = performance.now();
+    for (const [index, spin] of rotationsInFlight) {
+      const remaining = spin.until - now;
+      const drawing = $('board').querySelector(`[data-tile="${index}"] .tile-drawing`);
+      if (remaining <= 0 || !drawing || lessMotion()) { rotationsInFlight.delete(index); continue; }
+      const from = spin.from * remaining / 150;
+      drawing.animate([{transform:`rotate(${from}deg)`},{transform:'rotate(0deg)'}],{duration:remaining,easing:'linear'});
+    }
     if (focus !== undefined && !network.solved) {
       const button = $('board').querySelector(`[data-tile="${focus}"]`);
       if (button) button.focus({preventScroll:true});
@@ -139,12 +162,13 @@
     $('house-counter').setAttribute('aria-label',`Свет в ${network.powered.length} из ${network.homes.length} домов`);
     $('lesson').innerHTML = A.icon(network.solved ? 'check' : 'bolt') + `<span>${network.solved ? 'Все дома подключены. Хорошая работа.' : level.lesson}</span>`;
     $('moves').textContent = `${attempt.moves} ${attempt.moves % 10 === 1 && attempt.moves % 100 !== 11 ? 'поворот' : attempt.moves % 10 >= 2 && attempt.moves % 10 <= 4 && (attempt.moves % 100 < 12 || attempt.moves % 100 > 14) ? 'поворота' : 'поворотов'}`;
-    $('undo').disabled = attempt.history.length === 0;
-    $('hint').disabled = network.solved;
+    $('undo').disabled = network.solved || checkpointActive || attempt.history.length === 0;
+    $('hint').disabled = network.solved || checkpointActive;
+    $('restart').disabled = checkpointActive;
   }
-  function renderTown() {
+  function renderTown(highlight = 0) {
     const count = countMain();
-    $('town').innerHTML = A.town(count,state.decor);
+    $('town').innerHTML = A.town(count,state.decor,lessMotion() ? 0 : highlight);
     $('progress-label').textContent = `${count} / 12`;
     $('progress-fill').style.width = `${count / 12 * 100}%`;
     const title = count === 0 ? 'Пока город дремлет' : count < 6 ? 'Свет возвращается' : count < 8 ? 'Пахнет свежим хлебом' : count < 12 ? 'Улица оживает' : 'Как хорошо дома';
@@ -163,12 +187,15 @@
     $('bonus-section').hidden = count < 12;
   }
   function renderWin() {
-    $('victory').hidden = !network.solved || viewingSolved;
-    if (!network.solved) return;
+    $('victory').hidden = !network.solved || checkpointActive;
+    $('lesson').hidden = network.solved || checkpointActive;
+    $('puzzle-actions').hidden = network.solved || checkpointActive;
+    $('study-checkpoint').hidden = !checkpointActive;
+    if (!network.solved || checkpointActive) return;
     const final = level.id === 12, last = level.id === levels.length;
     const title = last ? 'До следующего вечера' : final ? 'Квартал зажжён!' : level.id === 6 ? 'Пекарня открыта!' : level.id === 8 ? 'Фонари зажглись!' : 'Вот и стало теплее';
-    const text = last ? 'Все 15 задач решены. Спасибо, что вернули свет на эту улицу.' : final ? 'В каждом окне — свет. Выберите украшение для улицы или решите ещё три задачи.' : level.id === 6 ? 'Посмотрите: в пекарне снова горят окна, а над крышей вьётся дым.' : 'Все дома получили свет. На соседней улице уже ждут вашей помощи.';
-    $('victory').innerHTML = `<div class="victory-card"><div class="victory-symbol">${A.icon(final || last ? 'moon' : 'check')}</div><h3>${title}</h3><p>${text}</p><button class="primary" id="next">${last ? 'Посмотреть квартал' : final ? 'Ещё немного света' : 'Следующая история'}${A.icon('arrow')}</button><button class="text-button" id="see-network">Посмотреть решение</button></div>`;
+    const text = last ? 'Все 15 задач решены. Свет остаётся с вами.' : final ? 'Выберите гирлянду или цветы для своего квартала.' : level.id === 6 ? 'В пекарне светло. Скоро будет готов свежий хлеб.' : level.id === 8 ? 'Фонарь осветил сквер. Теперь можно гулять допоздна.' : 'Ещё одно окно вашего квартала светится.';
+    $('victory').innerHTML = `<div class="victory-copy"><div class="victory-heading"><h3>${title}</h3><button class="replay-button" data-action="replay" aria-label="Начать задачу заново" title="Начать задачу заново">${A.icon('reset')}</button></div><p>${text}</p></div><div class="victory-actions">${final?'<button class="tool-button" data-action="choose-decor">Украсить</button>':''}<button class="primary" id="next">${last ? 'Мой квартал' : final ? 'Бонусы' : 'Дальше'}${A.icon('arrow')}</button></div>`;
   }
   function render(clicked = -1) { renderBoard(clicked); renderTown(); renderWin(); }
   function playSound(win = false) {
@@ -186,7 +213,8 @@
     } catch (_) { /* Audio is optional. */ }
   }
   function complete() {
-    if (!network.solved) return;
+    if (!network.solved) return false;
+    const firstCompletion = !state.completed.includes(level.id);
     if (!state.completed.includes(level.id)) {
       state.completed.push(level.id); state.completed.sort((a,b)=>a-b);
       if ([6,8,12].includes(level.id)) log('district_unlock', {level:level.id});
@@ -195,16 +223,40 @@
       log('level_complete',{level:level.id,attempt:attempt.number,foregroundMs:Math.round(attempt.foregroundMs),turns:attempt.turns,undos:attempt.undos,hinted:attempt.hinted});
       attempt.reported = true;
     }
+    return firstCompletion;
+  }
+  function maybeCheckpoint() {
+    if (!testing || journal.checkpointChoice || checkpointActive) return;
+    if (journal.checkpointOffered || [1,2,3].every(n => state.completed.includes(n))) checkpoint(journal.checkpointReason || 'three_levels');
+  }
+  function celebrate(firstCompletion) {
+    $('victory').style.setProperty('--win-delay',lessMotion()?'0ms':'600ms');
+    if (!lessMotion()) {
+      $('board').classList.add('power-wave');
+      clearTimeout(waveTimer); waveTimer = setTimeout(()=>{$('board').classList.remove('power-wave');$('victory').style.setProperty('--win-delay','0ms');},850);
+    }
+    if (firstCompletion && level.id <= 12) {
+      renderTown(level.id);
+      clearTimeout(townTimer); townTimer=setTimeout(()=>{$('town').querySelectorAll('.town-new').forEach(el=>el.classList.remove('town-new'));},1600);
+    }
+    maybeCheckpoint();
   }
   $('board').addEventListener('click', event => {
     const button = event.target.closest('[data-tile]');
     if (!button) return;
+    if (network.solved || button.disabled) return;
     if(!beforeAction())return;
     if ($('modal').open) return;
     const i = Number(button.dataset.tile);
+    if (!lessMotion()) {
+      const now = performance.now(), previous = rotationsInFlight.get(i);
+      const residual = previous ? previous.from * Math.max(0, previous.until-now)/150 : 0;
+      rotationsInFlight.set(i,{from:residual-90,until:now+150});
+    }
     if (!E.turn(level,attempt,i)) return;
-    attempt.turns++; network = E.inspect(level,attempt.rotations); complete(); playSound(network.solved);
+    attempt.turns++; network = E.inspect(level,attempt.rotations); const firstCompletion=complete(); playSound(network.solved);
     render(i); save();
+    if(network.solved)celebrate(firstCompletion);
   });
   $('board').addEventListener('keydown', event => {
     const step = {ArrowLeft:-1,ArrowRight:1,ArrowUp:-level.size,ArrowDown:level.size}[event.key];
@@ -219,6 +271,8 @@
   });
   $('undo').addEventListener('click', () => {
     if(!beforeAction())return;
+    if(network.solved)return;
+    rotationsInFlight.clear();
     if (!E.undo(attempt)) return;
     attempt.undos++; network = E.inspect(level,attempt.rotations); viewingSolved = false;
     log('undo',{level:level.id,attempt:attempt.number});render();save();
@@ -226,6 +280,7 @@
   function restart() {
     if(!beforeAction())return;
     log('level_restart',{level:level.id,attempt:attempt.number});
+    clearTimeout(waveTimer);$('board').classList.remove('power-wave');rotationsInFlight.clear();
     attempt = newAttempt(level,attempt.number+1); state.attempts[level.id] = attempt;
     network = E.inspect(level,attempt.rotations);viewingSolved=false;$('hint-text').hidden=true;
     log('level_start',{level:level.id,attempt:attempt.number,reason:'restart'});render();save();
@@ -240,26 +295,39 @@
     attempt.hinted=true;$('hint-text').textContent=level.hint;$('hint-text').hidden=!$('hint-text').hidden;save();
   });
   function proceed() {
-    if (level.id === levels.length) { viewingSolved=true;renderWin(); $('town').scrollIntoView({behavior:state.reducedMotion?'auto':'smooth',block:'center'}); return; }
+    if (level.id === levels.length) { $('town').scrollIntoView({behavior:lessMotion()?'auto':'smooth',block:'center'}); return; }
     setLevel(level.id+1,'next');
   }
   $('victory').addEventListener('click', event => {
     if(event.target.closest('#next')) proceed();
-    if(event.target.closest('#see-network')) {viewingSolved=true;renderWin();$('lesson').innerHTML=`<button class="primary" id="continue-below">${level.id===levels.length?'Квартал готов':'Следующая история'}${A.icon('arrow')}</button>`;}
   });
-  $('lesson').addEventListener('click', event => {if(event.target.closest('#continue-below'))proceed();});
   for (const id of ['level-list','bonus-list']) $(id).addEventListener('click',event=>{const button=event.target.closest('[data-level]');if(button&&!button.disabled)setLevel(Number(button.dataset.level));});
   $('decor').addEventListener('click',event=>{const button=event.target.closest('[data-decor]');if(!button)return;state.decor=button.dataset.decor;log('decor_choice',{choice:state.decor});renderTown();save();});
-  function renderSettings(){ $('sound').innerHTML=A.icon(state.sound?'sound':'mute');$('sound').setAttribute('aria-label',state.sound?'Выключить звук':'Включить звук');$('sound').title=state.sound?'Выключить звук':'Включить звук';document.documentElement.classList.toggle('reduced-motion',state.reducedMotion); }
+  function renderSettings(){
+    $('sound').innerHTML=A.icon(state.sound?'sound':'mute');$('sound').setAttribute('aria-label',state.sound?'Выключить звук':'Включить звук');$('sound').title=state.sound?'Выключить звук':'Включить звук';
+    document.documentElement.classList.toggle('reduced-motion',state.reducedMotion);
+    if(lessMotion()){
+      clearTimeout(waveTimer);clearTimeout(townTimer);rotationsInFlight.clear();
+      $('board').classList.remove('power-wave');$('victory').style.setProperty('--win-delay','0ms');
+      $('town').querySelectorAll('.town-new').forEach(el=>el.classList.remove('town-new'));
+      document.getAnimations().forEach(animation=>animation.cancel());
+    }
+  }
+  motionQuery.addEventListener('change',renderSettings);
   $('sound').addEventListener('click',()=>{state.sound=!state.sound;renderSettings();if(state.sound)playSound();else if(audioContext)audioContext.suspend().catch(()=>{});save();});
   function modal(html, priority = false) {
     if(!priority && !beforeAction())return;
     $('modal-content').innerHTML=html;if(!$('modal').open)$('modal').showModal();
     if(audioContext)audioContext.suspend().catch(()=>{});
   }
-  function closeModal(){if($('modal').open)$('modal').close();lastClock=performance.now();}
+  function returnNormal(){
+    returnNormalOnClose=false;testing=false;checkpointActive=false;
+    $('modal-close').hidden=false;stateKey=MAIN_KEY;state=cleanState(read(MAIN_KEY));
+    setLevel(state.current,'return_normal');renderSettings();
+  }
+  function closeModal(){if($('modal').open)$('modal').close();if(returnNormalOnClose)returnNormal();lastClock=performance.now();}
   $('modal-close').addEventListener('click',closeModal);
-  $('modal').addEventListener('close',()=>{lastClock=performance.now();});
+  $('modal').addEventListener('close',()=>{if(returnNormalOnClose)returnNormal();lastClock=performance.now();});
   $('modal').addEventListener('cancel',event=>{if(checkpointActive)event.preventDefault();});
   $('help').addEventListener('click',()=>modal(`<h2 class="modal-content-title">Пара поворотов —<br>и станет светлее.</h2><p>Нажимайте на провода, чтобы повернуть их на 90°. Соедините станцию со всеми домами одновременно.</p><ul><li>Концы соседних проводов должны смотреть друг на друга.</li><li>Дом можно временно погасить и перестроить путь.</li><li>Провод с заклёпкой не вращается.</li><li>Две дуги в одной клетке проводят свет независимо.</li></ul><p>Отменяйте ходы, пробуйте снова, пользуйтесь подсказкой. Штрафов и таймера нет.</p><label><input id="reduce-motion" type="checkbox" ${state.reducedMotion?'checked':''}>Меньше анимации</label><p class="small">Прогресс хранится только в этом браузере. При очистке данных или смене устройства он не переносится.</p><button class="primary" data-action="close">Всё понятно</button>`));
   function toolsModal(){
@@ -269,9 +337,9 @@
   }
   $('test-tools').addEventListener('click',toolsModal);
   function startTest(){
-    closeModal();testing=true;stateKey=STUDY_KEY;
+    closeModal();checkpointActive=false;testing=true;stateKey=STUDY_KEY;
     journal={schemaVersion:1,buildId:BUILD,levelSetVersion:1,testRunId:Math.random().toString(36).slice(2,12),seq:0,foregroundMs:0,events:[],dropped:0,checkpointOffered:false,checkpointChoice:null,running:true,completed:false};
-    state=freshState();log('session_start',{mode:'new_test'});setLevel(1,'test_start');renderSettings();log('game_ready');
+    state=freshState();log('session_start',{mode:'new_test',buildId:BUILD});setLevel(1,'test_start');renderSettings();log('game_ready');
   }
   function exportLog(){
     tick();saveLog();
@@ -282,42 +350,54 @@
   }
   function checkpoint(reason){
     if(!testing||journal.checkpointChoice)return;
-    checkpointActive=true;$('modal-close').hidden=true;
+    checkpointActive=true;
+    if($('modal').open)$('modal').close();
     if(!journal.checkpointOffered){journal.checkpointOffered=true;journal.checkpointReason=reason;log('checkpoint_shown',{reason});}
-    modal('<h2 class="modal-content-title">Спасибо за первые огоньки.</h2><p>Обязательная часть закончена. Можно остановиться здесь или поиграть ещё — как вам хочется.</p><div class="modal-buttons"><button class="tool-button" data-action="checkpoint-stop">Закончить</button><button class="tool-button" data-action="checkpoint-continue">Продолжить</button></div>',true);
+    $('study-checkpoint').innerHTML='<p>Спасибо за первые огоньки. Продолжим прогулку?</p><div class="checkpoint-actions"><button class="tool-button" data-action="checkpoint-stop">Закончить</button><button class="tool-button" data-action="checkpoint-continue">Продолжить</button></div>';
+    renderBoard();renderWin();lastClock=performance.now();
   }
   function finishTest(){
+    tick();
     checkpointActive=false;$('modal-close').hidden=false;
-    tick();log('test_finish',{level:level.id});journal.completed=true;journal.running=false;journal.summary={completedLevels:[...state.completed],currentLevel:state.current};saveLog();
+    log('test_finish',{level:level.id});journal.completed=true;journal.running=false;journal.summary={completedLevels:[...state.completed],currentLevel:state.current};saveLog();
     testing=false;
+    returnNormalOnClose=true;
     modal('<h2 class="modal-content-title">Спасибо за прогулку.</h2><p>Что побуждало открыть следующую задачу? Где стало непонятно или скучно?</p><p class="small">Ответы обсудите с наблюдателем. Дневник можно скачать для разбора.</p><div class="modal-buttons"><button class="primary" data-action="export">Скачать дневник</button><button class="tool-button" data-action="return-normal">Мой квартал</button></div>');
   }
   $('modal-content').addEventListener('change',event=>{if(event.target.id==='reduce-motion'){state.reducedMotion=event.target.checked;renderSettings();save();}});
-  $('modal-content').addEventListener('click',event=>{
+  document.addEventListener('click',event=>{
     const button=event.target.closest('[data-action]');if(!button)return;
     switch(button.dataset.action){
       case 'close':closeModal();break;
       case 'restart-confirm':closeModal();restart();break;
-      case 'new-test':startTest();break;
+      case 'new-test':
+        if(journal)modal('<h2 class="modal-content-title">Начать новый тест?</h2><p>Текущий дневник будет заменён. Скачайте его, если хотите сохранить запись.</p><div class="modal-buttons"><button class="tool-button" data-action="export">Скачать JSON</button><button class="primary" data-action="confirm-new-test">Начать новый</button><button class="tool-button" data-action="close">Отмена</button></div>');
+        else startTest();break;
+      case 'confirm-new-test':startTest();break;
       case 'export':exportLog();break;
       case 'finish-test':finishTest();break;
       case 'checkpoint-stop':journal.checkpointChoice='stop';log('checkpoint_choice',{choice:'stop'});finishTest();break;
-      case 'checkpoint-continue':journal.checkpointChoice='continue';log('checkpoint_choice',{choice:'continue'});checkpointActive=false;$('modal-close').hidden=false;closeModal();if(journal.nextLevel)setLevel(journal.nextLevel,'checkpoint');else if(network.solved)proceed();break;
-      case 'return-normal':closeModal();stateKey=MAIN_KEY;state=cleanState(read(MAIN_KEY));setLevel(state.current,'return_normal');renderSettings();break;
+      case 'checkpoint-continue':journal.checkpointChoice='continue';log('checkpoint_choice',{choice:'continue'});checkpointActive=false;closeModal();if(journal.nextLevel)setLevel(journal.nextLevel,'checkpoint');else if(network.solved)proceed();else render();break;
+      case 'return-normal':closeModal();break;
+      case 'replay':$('restart').click();break;
+      case 'choose-decor':
+        modal('<h2 class="modal-content-title">Ваш последний штрих</h2><p>Что добавим на вечернюю улицу?</p><div class="modal-buttons"><button class="tool-button" data-action="pick-garland">Гирлянду</button><button class="tool-button" data-action="pick-flowers">Цветы</button></div>');break;
+      case 'pick-garland':case 'pick-flowers':state.decor=button.dataset.action==='pick-garland'?'garland':'flowers';log('decor_choice',{choice:state.decor});renderTown();save();closeModal();break;
     }
   });
   document.addEventListener('visibilitychange',()=>{
     // Visibility has already changed: settle the preceding visible interval before pausing.
-    if(document.hidden&&!$('modal').open&&attempt&&!network.solved){const elapsed=performance.now()-lastClock;attempt.foregroundMs+=elapsed;if(testing)journal.foregroundMs+=elapsed;}
+    if(document.hidden&&!$('modal').open&&!checkpointActive&&attempt&&!network.solved){const elapsed=performance.now()-lastClock;attempt.foregroundMs+=elapsed;if(testing)journal.foregroundMs+=elapsed;}
     lastClock=performance.now();log('visibility_change',{hidden:document.hidden});save();saveLog();
     if(document.hidden&&audioContext)audioContext.suspend().catch(()=>{});
   });
   window.addEventListener('pagehide',()=>{tick();save();saveLog();});
   document.querySelectorAll('[data-icon]').forEach(el=>el.innerHTML=A.icon(el.dataset.icon));
-  log('session_start',{mode:'resume_test'});
+  document.documentElement.dataset.build=BUILD;
+  log('session_start',{mode:'resume_test',buildId:BUILD});
   setLevel(state.current,'load');renderSettings();log('game_ready');
-  if(testing && !journal.checkpointChoice && (journal.checkpointOffered || (state.current>3 && [1,2,3].every(n=>state.completed.includes(n)))))checkpoint(journal.checkpointReason||'restored');
+  maybeCheckpoint();
   setInterval(()=>{tick();if(testing&&!journal.checkpointOffered&&journal.foregroundMs>=300000)checkpoint('five_minutes');},1000);
   setInterval(()=>{save();if(testing)saveLog();},10000);
-  if(new URLSearchParams(location.search).has('test'))toolsModal();
+  if(new URLSearchParams(location.search).has('test')&&!testing)toolsModal();
 })();
